@@ -1,6 +1,7 @@
 package com.bretpatterson.schemagen.graphql.impl;
 
 import com.bretpatterson.schemagen.graphql.IDataFetcherFactory;
+import com.bretpatterson.schemagen.graphql.IDefaultValueSupplier;
 import com.bretpatterson.schemagen.graphql.IGraphQLObjectMapper;
 import com.bretpatterson.schemagen.graphql.IGraphQLTypeCache;
 import com.bretpatterson.schemagen.graphql.IQueryFactory;
@@ -323,9 +324,21 @@ public class GraphQLObjectMapper implements IGraphQLObjectMapper, TypeResolver {
 
 			builder.argument(argBuilder.build());
 
+			Object customDefault = null;
+			Optional<IGraphQLTypeMapper> tm = getCustomTypeMapper(paramType);
+			if (!tm.isPresent() && paramType instanceof ParameterizedType) {
+				tm = getCustomTypeMapper(((ParameterizedType)paramType).getRawType());
+			}
+			if (tm.isPresent()) {
+				if (tm.get() instanceof IDefaultValueSupplier) {
+					IDefaultValueSupplier supplier = (IDefaultValueSupplier) tm.get();
+					customDefault = supplier.getDefaultValue(this, paramType);
+				}
+			}
+			
 			dataFetcher.addParam(graphQLParam.name(),
 					paramType,
-					Optional.<Object> fromNullable(AnnotationUtils.isNullValue(graphQLParam.defaultValue()) ? null : graphQLParam.defaultValue()));
+					Optional.<Object> fromNullable(AnnotationUtils.isNullValue(graphQLParam.defaultValue()) ? customDefault : graphQLParam.defaultValue()));
 
 			index++;
 		}

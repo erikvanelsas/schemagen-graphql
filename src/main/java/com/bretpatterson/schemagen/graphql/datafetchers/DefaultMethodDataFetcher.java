@@ -45,7 +45,7 @@ public class DefaultMethodDataFetcher implements IMethodDataFetcher {
 
 	Object getDefaultValue(DataFetchingEnvironment environment, String name, Type argumentType) {
 		if (parameterDefaultValue.containsKey(name)) {
-			return typeFactory.convertToType(argumentTypeMap.get(name), parameterDefaultValue.get(name));
+			return typeFactory.convertToType(argumentType, parameterDefaultValue.get(name));
 		} else {
 			return null;
 		}
@@ -61,7 +61,7 @@ public class DefaultMethodDataFetcher implements IMethodDataFetcher {
 	Object getParamValue(DataFetchingEnvironment environment, String argumentName, Type argumentType) {
 		Object value = environment.getArgument(argumentName);
 		if (value == null) {
-			value = getDefaultValue(environment, argumentName, argumentType);
+			return getDefaultValue(environment, argumentName, argumentType);
 		}
 		return convertToType(argumentType, value);
 	}
