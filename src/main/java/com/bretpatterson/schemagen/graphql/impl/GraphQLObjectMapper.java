@@ -215,7 +215,7 @@ public class GraphQLObjectMapper implements IGraphQLObjectMapper, TypeResolver {
 
 		return builder;
 	}
-	private GraphQLFieldDefinition.Builder processDescription(GraphQLFieldDefinition.Builder builder, Optional<Method> method, Optional<Field> field) {
+	private Optional<GraphQLDescription> processDescription(Optional<Method> method, Optional<Field> field) {
 		Optional<GraphQLDescription> maybeDescription = Optional.absent();
 		if (method.isPresent()) {
 			maybeDescription = Optional.fromNullable(method.get().getAnnotation(GraphQLDescription.class));
@@ -226,11 +226,7 @@ public class GraphQLObjectMapper implements IGraphQLObjectMapper, TypeResolver {
 			}
 		}
 
-		if (maybeDescription.isPresent()) {
-			builder.description(maybeDescription.get().value());
-		}
-
-		return builder;
+		return maybeDescription;
 	}
 
 	public Optional<GraphQLFieldDefinition> getFieldType(Type type, Method method, Optional<Object> targetObject,  Optional<String> providedFieldName) {
@@ -288,7 +284,10 @@ public class GraphQLObjectMapper implements IGraphQLObjectMapper, TypeResolver {
 
 		builder.dataFetcher(dataFetcher);
 		processDeprecated(builder, Optional.of(method), field);
-		processDescription(builder, Optional.of(method), field);
+		Optional<GraphQLDescription> maybeDescription = processDescription(Optional.of(method), field);
+		if (maybeDescription.isPresent()) {
+			builder.description(maybeDescription.get().value());
+		}
 
 		return Optional.of(builder.build());
 	}
@@ -421,6 +420,65 @@ public class GraphQLObjectMapper implements IGraphQLObjectMapper, TypeResolver {
 		return Optional.absent();
 	}
 
+	public Optional<GraphQLInputObjectField> getInputFieldType(Type type, Method method, Optional<Object> targetObject,  Optional<String> providedFieldName) {
+		Optional<String> fieldName = providedFieldName.isPresent() ? providedFieldName : getFieldNameFromMethod(method);
+		if (!fieldName.isPresent()) {
+			return Optional.absent();
+		}
+
+		Type fieldType = method.getGenericReturnType();
+		GraphQLInputType graphQLFieldType = getInputType(fieldType);
+		Class<?> typeClass = getClassFromType(type);
+		Optional<Field> field = getField(typeClass, fieldName.get());
+
+
+		GraphQLName name = method.getAnnotation(GraphQLName.class);
+		if (name != null) {
+			fieldName = Optional.of(name.name());
+		}
+
+		GraphQLInputObjectField.Builder builder = new GraphQLInputObjectField.Builder().name(fieldName.get()).type(graphQLFieldType);
+
+		Optional<GraphQLDescription> maybeDescription = processDescription(Optional.of(method), field);
+		if (maybeDescription.isPresent()) {
+			builder.description(maybeDescription.get().value());
+		}
+
+		return Optional.of(builder.build());
+	}
+
+	private Optional<GraphQLInputObjectField> getInputFieldType(Type type, Field field, Optional<Object> targetObject, Optional<String> providedFieldName) {
+		String fieldName = providedFieldName.isPresent() ? providedFieldName.get() : field.getName();
+
+		if (Modifier.isAbstract(field.getModifiers())) {
+			LOGGER.info("Ignoring input abstract field {}#{}  ", type, field);
+			return Optional.absent();
+		}
+		if (Modifier.isStatic(field.getModifiers())) {
+			LOGGER.info("Ignoring input static field {}#{}  ", type, field);
+			return Optional.absent();
+		}
+		if ("this$0".equals(fieldName)) {
+			// this is a dirty hack but we don't want to expose the parent pointer of inner classes...
+			return Optional.absent();
+		}
+		LOGGER.info("Processing input field {}#{}  ", type, field);
+		GraphQLName name = field.getAnnotation(GraphQLName.class);
+		Optional<GraphQLDescription> maybeDescription = Optional.fromNullable(field.getAnnotation(GraphQLDescription.class));
+		if (name != null) {
+			fieldName = name.name();
+		}
+		GraphQLInputType graphQLFieldType = getInputType(field.getGenericType());
+		GraphQLInputObjectField.Builder builder = new GraphQLInputObjectField.Builder().name(fieldName).type(graphQLFieldType);
+
+		// set the description for the field if provided
+		if (maybeDescription.isPresent() && !AnnotationUtils.isNullValue(maybeDescription.get().value())) {
+			builder.description(maybeDescription.get().value());
+		}
+
+		return Optional.of(builder.build());
+	}
+
 	private Optional<IGraphQLTypeMapper> getCustomTypeMapper(Type type) {
 		if (getClassTypeMappers().containsKey(type)) {
 			return Optional.fromNullable(getClassTypeMappers().get(type));
@@ -442,21 +500,46 @@ public class GraphQLObjectMapper implements IGraphQLObjectMapper, TypeResolver {
 
 	@Override
 	public GraphQLInputType getInputType(Type type) {
-		GraphQLInputType rv;
 		String typeName = this.getTypeNamingStrategy().getTypeName(this, type);
 		if (getInputTypeCache().containsKey(typeName)) {
 			return getInputTypeCache().get(typeName);
 		}
-		// check typemapper
+		
 		Optional<IGraphQLTypeMapper> typeMapper = getCustomTypeMapper(type);
 		if (typeMapper.isPresent()) {
-			rv = getInputTypeCache().put(typeName, typeMapper.get().getInputType(this, type));
-		} else {
-			GraphQLOutputType outputType = getOutputType(type);
-			rv = getInputTypeCache().put(typeName, getInputType(outputType));
+			return getInputTypeCache().put(typeName, typeMapper.get().getInputType(this, type));
 		}
+		if (type instanceof ParameterizedType) {
+			ParameterizedType parameterizedType = (ParameterizedType) type;
+			Type rawType = parameterizedType.getRawType();
+			Class<?> rawClass = (Class<?>) rawType;
 
-		return rv;
+			typeMapper = getCustomTypeMapper(rawClass);
+			if (typeMapper.isPresent()) {
+				return getInputTypeCache().put(typeName, typeMapper.get().getInputType(this, type));
+			} else {
+				return buildInputObject(type, rawClass);
+			}
+		}
+		if (type instanceof TypeVariable) {
+			TypeVariable<?> vType = (TypeVariable<?>) type;
+			return getInputType(typeArguments.peek().get(vType.getName()));
+		} else {
+			Class<?> classType = getClassFromType(type);
+			Optional<GraphQLScalarType> graphQLType = getIfPrimitiveType(classType);
+
+			if (graphQLType.isPresent()) {
+				return getInputTypeCache().put(typeName, graphQLType.get());
+			}
+			if (classType.isEnum()) {
+				GraphQLEnumType.Builder enumType = GraphQLEnumType.newEnum().name(typeNamingStrategy.getTypeName(this, type));
+				for (Object value : classType.getEnumConstants()) {
+					enumType.value(value.toString(), value);
+				}
+				return getInputTypeCache().put(typeName, enumType.build());
+			}
+			return buildInputObject(type, classType);
+		}
 	}
 
 	@Override
@@ -521,40 +604,6 @@ public class GraphQLObjectMapper implements IGraphQLObjectMapper, TypeResolver {
 		return this.typeFactory;
 	}
 
-	private GraphQLInputType getInputType(GraphQLOutputType outputType) {
-		if (GraphQLInputType.class.isAssignableFrom(outputType.getClass())) {
-			return (GraphQLInputType) outputType;
-		} else if (outputType instanceof GraphQLObjectType) {
-			GraphQLObjectType objectType = (GraphQLObjectType) outputType;
-
-			final String inputTypeName;
-
-			inputTypeName = String.format("%s%s%s",
-					objectType.getName(),
-					this.getTypeNamingStrategy().getDelimiter(),
-					this.getTypeNamingStrategy().getInputTypePostfix());
-
-			GraphQLInputObjectType.Builder rv = GraphQLInputObjectType.newInputObject().name(inputTypeName);
-
-			rv.description(((GraphQLObjectType) outputType).getDescription());
-			for (GraphQLFieldDefinition field : objectType.getFieldDefinitions()) {
-				rv.field(GraphQLInputObjectField.newInputObjectField()
-						.name(field.getName())
-						.type(getInputType(field.getType()))
-						.description(field.getDescription())
-						.build());
-
-			}
-
-			GraphQLInputType type = rv.build();
-			inputTypes.add(type);
-			return type;
-
-		} else {
-			throw new RuntimeException(String.format("Unknown output type %s", outputType.toString()));
-		}
-	}
-
 	private Optional<GraphQLScalarType> getIfPrimitiveType(Class<?> classType) {
 		GraphQLScalarType rv = null;
 		// native types
@@ -573,6 +622,75 @@ public class GraphQLObjectMapper implements IGraphQLObjectMapper, TypeResolver {
 		}
 
 		return Optional.fromNullable(rv);
+	}
+
+	private GraphQLInputObjectType buildInputObject(Type type, Class<?> classType) {
+		String inputTypeName = String.format("%s%s%s", this.getTypeNamingStrategy().getTypeName(this, type),
+				this.getTypeNamingStrategy().getDelimiter(), this.getTypeNamingStrategy().getInputTypePostfix());
+
+		GraphQLInputObjectType.Builder glType = new GraphQLInputObjectType.Builder().name(inputTypeName);
+		ImmutableList.Builder<GraphQLInputObjectField> fields = ImmutableList.builder();
+
+		Class<?> classItem = classType;
+		Optional<GraphQLDescription> maybeGraphqlDesc = Optional
+				.fromNullable(classItem.getAnnotation(GraphQLDescription.class));
+		Set<String> fieldNames = Sets.newHashSet();
+
+		if (maybeGraphqlDesc.isPresent()) {
+			glType.description(maybeGraphqlDesc.get().value());
+		}
+		// if we are a generic object then we need to build a generic variable
+		// to type mapping
+		if (type instanceof ParameterizedType) {
+			// if it's empty then we are at root generic class so create new
+			// type argument map for usage
+			if (typeArguments.empty()) {
+				typeArguments.push(Maps.<String, Type>newHashMap());
+			} else {
+				// we are inside the context of another generic object, so
+				// create a copy of parent map to use within new context
+				typeArguments.push(Maps.newHashMap(typeArguments.peek()));
+			}
+			buildGenericArgumentTypeMap((ParameterizedType) type);
+		}
+		String classPackage = "";
+
+		if (classItem != null && classItem.getPackage() != null) {
+			classPackage = classItem.getPackage().getName();
+		}
+		// end when there are no more super classes and while ignore java.*
+		// types
+		while (classItem != null && !classPackage.startsWith("java.")) {
+			Collection<GraphQLInputObjectField> newInputFields = getGraphQLInputObjectFields(Optional.absent(), type,
+					classItem, Optional.<List<Field>>absent(), Optional.<List<Method>>absent());
+			if (newInputFields != null) {
+				for (GraphQLInputObjectField f : newInputFields) {
+					if (!fieldNames.contains(f.getName())) {
+						fieldNames.add(f.getName());
+						fields.add(f);
+					} else {
+						LOGGER.info("Ignoring duplicate input field {} from type {}", f.getName(), classItem.getName());
+					}
+				}
+			}
+
+			// pop currentContext
+			classItem = classItem.getSuperclass();
+			if (classItem != null && classItem.getPackage() != null) {
+				classPackage = classItem.getPackage().getName();
+			} else {
+				classPackage = "";
+			}
+		}
+
+		// exiting context of current type arguments if we processed a generic
+		// type
+		if (type instanceof ParameterizedType) {
+			typeArguments.pop();
+		}
+		glType.fields(fields.build());
+
+		return (GraphQLInputObjectType) getInputTypeCache().put(inputTypeName, glType.build());
 	}
 
 	private GraphQLObjectType buildObject(Type type, Class<?> classType) {
@@ -663,6 +781,55 @@ public class GraphQLObjectMapper implements IGraphQLObjectMapper, TypeResolver {
 		return rv;
 	}
 
+	public Collection<GraphQLInputObjectField> getGraphQLInputObjectFields(Optional<Object> targetObject, Type type, Class<?> classItem, Optional<List<Field>> fields, Optional<List<Method>> methods) {
+		Map<String, GraphQLInputObjectField> inputFields = Maps.newLinkedHashMap();
+		Optional<GraphQLInputObjectField> optionalInputField;
+		Set<String> ignoredFields = Sets.newHashSet();
+		List<Field> fieldList;
+		List<Method> methodList;
+
+		fieldList = fields.or(ImmutableList.copyOf(classItem.getDeclaredFields()));
+		methodList = methods.or(ImmutableList.copyOf(classItem.getDeclaredMethods()));
+
+		for (Method m : methodList) {
+			Optional<String> methodName = getFieldNameFromMethod(m);
+			// we only look at getters and is types
+			if (!methodName.isPresent()) {
+				continue;
+			}
+			if (null != m.getAnnotation(GraphQLIgnore.class)) {
+				ignoredFields.add(methodName.get());
+				continue;
+			}
+			optionalInputField = getInputFieldType(type, m, targetObject, methodName);
+			if (optionalInputField.isPresent()) {
+				inputFields.put(optionalInputField.get().getName(), optionalInputField.get());
+			}
+		}
+
+		for (Field field : fieldList) {
+			// skip ignored fields
+			if (null != field.getAnnotation(GraphQLIgnore.class) || ignoredFields.contains(field.getName())) {
+				// if it's marked ignored then remove it.
+				if (inputFields.containsKey(field.getName())) {
+					inputFields.remove(field.getName());
+				}
+				continue;
+			}
+			if (inputFields.containsKey(field.getName())) {
+				continue;
+			}
+			optionalInputField = getInputFieldType(type, field, targetObject, Optional.<String>absent());
+			if (optionalInputField.isPresent()) {
+				if (!field.getName().startsWith("$")) {
+					inputFields.put(optionalInputField.get().getName(), optionalInputField.get());
+				}
+			}
+		}
+
+		return inputFields.values();
+	}
+	
 	@Override
 	public Collection<GraphQLFieldDefinition> getGraphQLFieldDefinitions(Optional<Object> targetObject, Type type, Class<?> classItem, Optional<List<Field>> fields, Optional<List<Method>> methods) {
 		Map<String, GraphQLFieldDefinition> fieldDefinitions = Maps.newLinkedHashMap();

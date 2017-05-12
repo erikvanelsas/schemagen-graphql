@@ -32,6 +32,12 @@ public interface IGraphQLTypeMapper {
 	 */
 	GraphQLOutputType getOutputType(IGraphQLObjectMapper graphQLObjectMapper, Type type);
 
+	/**
+	 * Convert the specified Type to to a GraphQLInputType.
+	 * @param graphQLObjectMapper
+	 * @param type
+	 * @return
+	 */
 	GraphQLInputType getInputType(IGraphQLObjectMapper graphQLObjectMapper, Type type);
 
 }
