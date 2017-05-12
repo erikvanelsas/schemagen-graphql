@@ -46,7 +46,7 @@ public interface IGraphQLObjectMapper {
 	IGraphQLTypeCache<GraphQLInputType> getInputTypeCache();
 
 	/**
-	 * Get the Input Type cache. This is useful for custom type mappers who
+	 * Get the Output Type cache. This is useful for custom type mappers who
 	 * might need to add TypeReference's to the cache when they need to process
 	 * an object that contains a two way dependency between itself and another object.
 	 */
